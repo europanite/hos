@@ -1,6 +1,6 @@
-title: "hos"
+title: "frontend_expo_template"
 description: "A Template For Frontend Expo Development."
-baseurl: "/hos"
+baseurl: "/frontend_expo_template"
 url: "https://europanite.github.io"
 theme: minima
 markdown: kramdown

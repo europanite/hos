@@ -1,428 +1,594 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Linking,
+  Animated,
+  Easing,
   Platform,
-  Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   View,
   useWindowDimensions,
+  NativeSyntheticEvent,
+  TextInputSubmitEditingEventData,
 } from "react-native";
 
-import { REPO_URL, REPO_URL_PAGE } from "./HomeScreenUtil";
+type Phase = "LOGIN_USER" | "LOGIN_PASS" | "ERROR" | "BABEL";
 
-type Role = "system" | "user" | "assistant";
+const BG = "#000000";
+const FG_NORMAL = "#ffffff";
+const FG_BABEL = "#ff2a2a";
 
-type Msg = {
-  id: string;
-  role: Role;
-  text: string;
-  ts: number;
-};
+const MAX_LINES = 800;
 
-function mkId() {
-  return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+const BABEL_TOKEN = "BABEL ";
+const BABEL_INTERVAL_MS = 500;
+const WRAP_COL = 72;
+
+// 起動アニメ全体の長さ（添付の映像がだいたい9秒台なのでそれに寄せる）
+const BOOT_MS = 9300;
+
+// 雰囲気（資料の“導入”っぽい行）
+const INTRO_LINES: string[] = [
+  "attach cd 01 /",
+  "enter author password",
+  "pass: E.HOBA",
+  "Go to, let us go down, and there confound their language,",
+  "that they may not understand one another's speech.",
+  "GENESIS 11:7",
+];
+
+type LineKind = "normal" | "babel";
+type Line = { id: number; text: string; kind: LineKind };
+
+function monoFont() {
+  return Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
 }
 
-function nowTs() {
-  return Date.now();
-}
+/**
+ * 起動アニメ（動画無し）
+ * - 十字ガイド線
+ * - 赤い四角が回転しながら拡大 → 画面を赤で埋める → 退いて枠＋エンブレム
+ * - タイトル文字がフェードイン
+ */
+function BootAnimation({ onDone }: { onDone: () => void }) {
+  const { width, height } = useWindowDimensions();
+  const progress = useRef(new Animated.Value(0)).current;
 
-function safeJsonStringify(obj: unknown) {
-  try {
-    return JSON.stringify(obj);
-  } catch {
-    return String(obj);
-  }
-}
-
-function extractReply(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const p = payload as Record<string, unknown>;
-
-  const candidates = ["reply", "message", "text", "output", "content", "answer"];
-  for (const k of candidates) {
-    const v = p[k];
-    if (typeof v === "string" && v.trim()) return v;
-  }
-
-  const data = p["data"];
-  if (data && typeof data === "object") {
-    const d = data as Record<string, unknown>;
-    for (const k of candidates) {
-      const v = d[k];
-      if (typeof v === "string" && v.trim()) return v;
-    }
-  }
-
-  return null;
-}
-
-const CONTENT_MAX_W = 820;
-const BG = "#0b0f16";
-const CARD = "#121a27";
-const BORDER = "#22304a";
-const TXT = "#e6ecff";
-const SUB = "#a8b3cf";
-const ACCENT = "#7aa2ff";
-
-export default function HomeScreen() {
-  const { width } = useWindowDimensions();
-  const isNarrow = width < 480;
-
-  const API_BASE: string = (process.env.EXPO_PUBLIC_API_BASE ?? "").trim();
-
-  const scrollRef = useRef<ScrollView | null>(null);
-  const inputRef = useRef<TextInput | null>(null);
-
-  const [apiStatus, setApiStatus] = useState<"unknown" | "ok" | "error">("unknown");
-  const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState("");
-
-  const [msgs, setMsgs] = useState<Msg[]>(() => [
-    {
-      id: mkId(),
-      role: "system",
-      text:
-        "HOS_BABEL is ready.\n" +
-        (API_BASE
-          ? `API base detected: ${API_BASE}`
-          : "API base is empty. Set EXPO_PUBLIC_API_BASE to enable server replies."),
-      ts: nowTs(),
-    },
-  ]);
-
-  const headerText = useMemo(() => {
-    if (!API_BASE) return "Offline mode";
-    if (apiStatus === "ok") return "API connected";
-    if (apiStatus === "error") return "API unreachable";
-    return "Checking API…";
-  }, [API_BASE, apiStatus]);
-
-  const scrollToBottom = useCallback((animated = true) => {
-    scrollRef.current?.scrollToEnd({ animated });
-  }, []);
+  const minSide = Math.min(width, height);
+  const baseSquare = Math.max(18, Math.floor(minSide * 0.06)); // 小さい赤四角の元サイズ
+  const outerFrame = Math.floor(minSide * 0.72);
+  const innerFrame = Math.floor(minSide * 0.42);
 
   useEffect(() => {
-    let cancelled = false;
+    const anim = Animated.timing(progress, {
+      toValue: 1,
+      duration: BOOT_MS,
+      easing: Easing.linear,
+      useNativeDriver: false, // Expo Web含め安定優先
+    });
 
-    async function ping() {
-      if (!API_BASE) {
-        setApiStatus("unknown");
-        return;
-      }
-      try {
-        const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 2500);
+    anim.start(({ finished }) => {
+      if (finished) onDone();
+    });
 
-        const res = await fetch(`${API_BASE}/health`, { signal: ctrl.signal });
-        clearTimeout(t);
-
-        if (cancelled) return;
-        setApiStatus(res ? "ok" : "error");
-      } catch {
-        if (cancelled) return;
-        setApiStatus("error");
-      }
-    }
-
-    ping();
     return () => {
-      cancelled = true;
+      progress.stopAnimation();
     };
-  }, [API_BASE]);
+  }, [onDone, progress]);
 
-  useEffect(() => {
-    scrollToBottom(false);
-  }, [msgs.length, scrollToBottom]);
+  // --- タイムライン（0..1） ---
+  const crossOpacity = progress.interpolate({
+    inputRange: [0.03, 0.07, 1],
+    outputRange: [0, 1, 1],
+  });
 
-  const appendMsg = useCallback((role: Role, text: string) => {
-    setMsgs((prev) => prev.concat([{ id: mkId(), role, text, ts: nowTs() }]));
-  }, []);
+  // 赤い四角：出現→回転しつつ拡大→画面を埋める→消える
+  const redOpacity = progress.interpolate({
+    inputRange: [0.05, 0.10, 0.36, 0.44],
+    outputRange: [0, 1, 1, 0],
+  });
+  const redScale = progress.interpolate({
+    inputRange: [0.05, 0.12, 0.18, 0.25],
+    outputRange: [0.05, 0.45, 2.4, 12], // 最終的に画面を埋める
+  });
+  const redRotate = progress.interpolate({
+    inputRange: [0.05, 0.12, 0.18, 0.25],
+    outputRange: ["0deg", "-8deg", "-18deg", "0deg"],
+  });
 
-  const sendToServer = useCallback(
-    async (userText: string) => {
-      if (!API_BASE) return null;
+  // “中のマーク/ガイド”っぽい薄いレイヤ
+  const innerMarkOpacity = progress.interpolate({
+    inputRange: [0.17, 0.24, 0.36],
+    outputRange: [0, 0.8, 0],
+  });
 
-      const endpoints = ["/chat", "/api/chat", "/rag", "/api/rag"];
-      const body = { text: userText };
+  // 枠＆エンブレム：赤が引いたあとに出る
+  const frameOpacity = progress.interpolate({
+    inputRange: [0.38, 0.48, 1],
+    outputRange: [0, 1, 1],
+  });
+  const frameScale = progress.interpolate({
+    inputRange: [0.38, 0.48],
+    outputRange: [0.985, 1],
+  });
 
-      for (const ep of endpoints) {
-        try {
-          const res = await fetch(`${API_BASE}${ep}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
+  const emblemOpacity = progress.interpolate({
+    inputRange: [0.42, 0.55],
+    outputRange: [0, 1],
+  });
 
-          const ct = res.headers.get("content-type") ?? "";
-          if (ct.includes("application/json")) {
-            const json = (await res.json()) as unknown;
-            const reply = extractReply(json);
-            if (reply) return reply;
-            return `Server responded (JSON) but reply field was not found:\n${safeJsonStringify(json)}`;
-          } else {
-            const text = await res.text();
-            if (text && text.trim()) return text;
-          }
-        } catch {
-        }
-      }
-      return null;
-    },
-    [API_BASE]
-  );
+  const titleOpacity = progress.interpolate({
+    inputRange: [0.60, 0.74],
+    outputRange: [0, 1],
+  });
 
-  const onSend = useCallback(async () => {
-    const text = draft.trim();
-    if (!text || busy) return;
-
-    setDraft("");
-    appendMsg("user", text);
-    setBusy(true);
-
-    try {
-      const reply = await sendToServer(text);
-      if (reply) {
-        appendMsg("assistant", reply);
-      } else {
-        appendMsg(
-          "assistant",
-          API_BASE
-            ? "I couldn't get a reply from the server (endpoint not found or error)."
-            : "Offline mode: no server call was made."
-        );
-      }
-    } catch (e) {
-      appendMsg("assistant", `Error: ${String(e)}`);
-    } finally {
-      setBusy(false);
-      inputRef.current?.focus();
-      setTimeout(() => scrollToBottom(true), 0);
-    }
-  }, [API_BASE, appendMsg, busy, draft, scrollToBottom, sendToServer]);
-
-  const openLink = useCallback(async (url: string) => {
-    try {
-      await Linking.openURL(url);
-    } catch {
-      appendMsg("assistant", `Couldn't open: ${url}`);
-    }
-  }, [appendMsg]);
+  // うっすら走査線（それっぽさ）
+  const scanOpacity = progress.interpolate({
+    inputRange: [0.0, 0.08, 0.92, 1.0],
+    outputRange: [0, 0.06, 0.06, 0],
+  });
+  const scanY = progress.interpolate({
+    inputRange: [0, 1],
+    outputRange: [-height, height],
+  });
 
   return (
-    <KeyboardAvoidingView
-      style={styles.root}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      keyboardVerticalOffset={Platform.OS === "ios" ? 64 : 0}
-    >
-      <View style={styles.top}>
-        <View style={[styles.container, { maxWidth: CONTENT_MAX_W }]}>
-          <View style={[styles.headerRow, isNarrow && { flexDirection: "column", alignItems: "flex-start", gap: 8 }]}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.title}>HOS_BABEL</Text>
-              <Text style={styles.sub}>{headerText}</Text>
-            </View>
+    <View style={{ flex: 1, backgroundColor: BG }}>
+      {/* 背景のわずかなビネット */}
+      <View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          inset: 0,
+          backgroundColor: "#000",
+          opacity: 1,
+        }}
+      />
 
-            <View style={[styles.headerActions, isNarrow && { alignSelf: "stretch" }]}>
-              <Pressable style={styles.linkBtn} onPress={() => openLink(REPO_URL_PAGE)}>
-                <Text style={styles.linkBtnText}>Open Web</Text>
-              </Pressable>
-              <Pressable style={styles.linkBtn} onPress={() => openLink(REPO_URL)}>
-                <Text style={styles.linkBtnText}>Repo</Text>
-              </Pressable>
-            </View>
-          </View>
+      {/* 十字ガイド */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          inset: 0,
+          opacity: crossOpacity,
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
+        {/* 横線（左右に分割して中心に“切れ目”） */}
+        <View style={{ position: "absolute", top: "50%", left: 0, right: 0, height: 1 }}>
+          <View
+            style={{
+              position: "absolute",
+              left: 0,
+              width: "44%",
+              height: 1,
+              backgroundColor: "rgba(150, 180, 220, 0.55)",
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              right: 0,
+              width: "44%",
+              height: 1,
+              backgroundColor: "rgba(150, 180, 220, 0.55)",
+            }}
+          />
         </View>
-      </View>
 
-      <View style={styles.mid}>
-        <View style={[styles.container, { maxWidth: CONTENT_MAX_W, flex: 1 }]}>
-          <View style={styles.card}>
-            <ScrollView
-              ref={scrollRef}
-              style={styles.scroll}
-              contentContainerStyle={styles.scrollContent}
-              keyboardShouldPersistTaps="handled"
-              onContentSizeChange={() => scrollToBottom(false)}
-            >
-              {msgs.map((m) => (
-                <View
-                  key={m.id}
-                  style={[
-                    styles.bubble,
-                    m.role === "user" ? styles.bubbleUser : m.role === "assistant" ? styles.bubbleAsst : styles.bubbleSys,
-                  ]}
-                >
-                  <Text style={styles.bubbleRole}>
-                    {m.role.toUpperCase()}{" "}
-                    <Text style={styles.bubbleTs}>
-                      {new Date(m.ts).toLocaleTimeString()}
-                    </Text>
-                  </Text>
-                  <Text style={styles.bubbleText}>{m.text}</Text>
-                </View>
-              ))}
-
-              {busy && (
-                <View style={[styles.bubble, styles.bubbleAsst]}>
-                  <Text style={styles.bubbleRole}>ASSISTANT</Text>
-                  <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                    <ActivityIndicator />
-                    <Text style={styles.bubbleText}>Thinking…</Text>
-                  </View>
-                </View>
-              )}
-            </ScrollView>
-
-            <View style={styles.inputRow}>
-              <TextInput
-                ref={inputRef}
-                style={styles.input}
-                value={draft}
-                onChangeText={setDraft}
-                placeholder="Type a message…"
-                placeholderTextColor={SUB}
-                multiline
-                editable={!busy}
-              />
-              <Pressable
-                style={[styles.sendBtn, (busy || !draft.trim()) && styles.sendBtnDisabled]}
-                onPress={onSend}
-                disabled={busy || !draft.trim()}
-              >
-                <Text style={styles.sendBtnText}>Send</Text>
-              </Pressable>
-            </View>
-
-            {!!API_BASE && apiStatus === "error" && (
-              <Text style={styles.warn}>
-                API looks unreachable. Check EXPO_PUBLIC_API_BASE or backend container.
-              </Text>
-            )}
-          </View>
+        {/* 縦線（上下に分割） */}
+        <View style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1 }}>
+          <View
+            style={{
+              position: "absolute",
+              top: 0,
+              height: "40%",
+              width: 1,
+              backgroundColor: "rgba(150, 180, 220, 0.55)",
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              bottom: 0,
+              height: "40%",
+              width: 1,
+              backgroundColor: "rgba(150, 180, 220, 0.55)",
+            }}
+          />
         </View>
-      </View>
+      </Animated.View>
 
-      <View style={styles.bottomPad} />
-    </KeyboardAvoidingView>
+      {/* 赤い四角（拡大・回転） */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: baseSquare,
+          height: baseSquare,
+          marginLeft: -baseSquare / 2,
+          marginTop: -baseSquare / 2,
+          backgroundColor: "#ff2a2a",
+          opacity: redOpacity,
+          transform: [{ scale: redScale }, { rotate: redRotate }],
+        }}
+      >
+        {/* 内側の薄いガイド（菱形＋枠） */}
+        <Animated.View
+          style={{
+            position: "absolute",
+            inset: 0,
+            opacity: innerMarkOpacity,
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <View
+            style={{
+              width: "58%",
+              height: "58%",
+              borderWidth: 1,
+              borderColor: "rgba(220,220,220,0.65)",
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              width: "36%",
+              height: "36%",
+              borderWidth: 1,
+              borderColor: "rgba(180,180,180,0.55)",
+              transform: [{ rotate: "45deg" }],
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              width: "44%",
+              height: 1,
+              backgroundColor: "rgba(200,200,200,0.35)",
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              height: "44%",
+              width: 1,
+              backgroundColor: "rgba(200,200,200,0.35)",
+            }}
+          />
+        </Animated.View>
+      </Animated.View>
+
+      {/* 枠（青白いアウトライン）＋エンブレム */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: outerFrame,
+          height: outerFrame,
+          marginLeft: -outerFrame / 2,
+          marginTop: -outerFrame / 2,
+          opacity: frameOpacity,
+          transform: [{ scale: frameScale }],
+          borderWidth: 2,
+          borderColor: "rgba(150, 180, 220, 0.55)",
+        }}
+      >
+        {/* 内枠 */}
+        <View
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: innerFrame,
+            height: innerFrame,
+            marginLeft: -innerFrame / 2,
+            marginTop: -innerFrame / 2,
+            borderWidth: 1,
+            borderColor: "rgba(150, 180, 220, 0.35)",
+          }}
+        />
+
+        {/* エンブレム（赤いSっぽい雰囲気：円＋角枠＋S文字） */}
+        <Animated.View
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: innerFrame * 0.78,
+            height: innerFrame * 0.78,
+            marginLeft: -(innerFrame * 0.78) / 2,
+            marginTop: -(innerFrame * 0.78) / 2,
+            opacity: emblemOpacity,
+            justifyContent: "center",
+            alignItems: "center",
+          }}
+        >
+          <View
+            style={{
+              position: "absolute",
+              width: "90%",
+              height: "90%",
+              borderWidth: 2,
+              borderColor: FG_BABEL,
+            }}
+          />
+          <View
+            style={{
+              position: "absolute",
+              width: "78%",
+              height: "78%",
+              borderWidth: 2,
+              borderColor: FG_BABEL,
+              borderRadius: 999,
+            }}
+          />
+          <Text
+            style={{
+              color: FG_BABEL,
+              fontFamily: monoFont(),
+              fontSize: Math.max(28, Math.floor(innerFrame * 0.22)),
+              lineHeight: Math.max(30, Math.floor(innerFrame * 0.22) + 2),
+              fontWeight: "600",
+              textAlign: "center",
+            }}
+          >
+            S
+          </Text>
+        </Animated.View>
+
+        {/* タイトル文字 */}
+        <Animated.View
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: Math.floor(outerFrame * 0.10),
+            alignItems: "center",
+            opacity: titleOpacity,
+          }}
+        >
+          <Text
+            style={{
+              color: "#d7a24a",
+              fontFamily: monoFont(),
+              fontSize: 14,
+              letterSpacing: 0.5,
+            }}
+          >
+            Hyper Operating System
+          </Text>
+          <Text
+            style={{
+              color: "#d7a24a",
+              fontFamily: monoFont(),
+              fontSize: 12,
+              marginTop: 2,
+              letterSpacing: 0.5,
+            }}
+          >
+            for ALL LABORS
+          </Text>
+        </Animated.View>
+
+        <Animated.View
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: Math.floor(outerFrame * 0.08),
+            alignItems: "center",
+            opacity: titleOpacity,
+          }}
+        >
+          <Text style={{ color: "#b07b2f", fontFamily: monoFont(), fontSize: 10 }}>
+            (c) 1989
+          </Text>
+        </Animated.View>
+      </Animated.View>
+
+      {/* 走査線 */}
+      <Animated.View
+        pointerEvents="none"
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          height: 2,
+          backgroundColor: "#ffffff",
+          opacity: scanOpacity,
+          transform: [{ translateY: scanY }],
+        }}
+      />
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: BG },
-  top: {
-    paddingTop: 10,
-    paddingHorizontal: 12,
-  },
-  mid: {
-    flex: 1,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-  },
-  bottomPad: { height: 12 },
+export default function HomeScreen() {
+  const [bootDone, setBootDone] = useState(false);
 
-  container: {
-    width: "100%",
-    alignSelf: "center",
-  },
+  // --- Console state ---
+  const [phase, setPhase] = useState<Phase>("LOGIN_USER");
+  const [user, setUser] = useState("");
+  const [pass, setPass] = useState("");
 
-  headerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-  },
-  headerActions: {
-    flexDirection: "row",
-    gap: 10,
-  },
+  const idRef = useRef(1);
+  const inputRef = useRef<TextInput | null>(null);
+  const scrollRef = useRef<ScrollView | null>(null);
 
-  title: { color: TXT, fontSize: 20, fontWeight: "700" },
-  sub: { color: SUB, marginTop: 2 },
+  const [lines, setLines] = useState<Line[]>(() => [
+    { id: idRef.current++, text: "HOS CONSOLE", kind: "normal" },
+    { id: idRef.current++, text: "", kind: "normal" },
+    { id: idRef.current++, text: "LOGIN REQUIRED.", kind: "normal" },
+    { id: idRef.current++, text: "", kind: "normal" },
+  ]);
 
-  linkBtn: {
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: CARD,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 12,
-  },
-  linkBtnText: { color: TXT, fontWeight: "600" },
+  const textHash = useMemo(
+    () => `${lines.length}:${lines.at(-1)?.id ?? 0}:${lines.at(-1)?.text.length ?? 0}`,
+    [lines]
+  );
 
-  card: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: BORDER,
-    backgroundColor: CARD,
-    borderRadius: 16,
-    overflow: "hidden",
-  },
+  useEffect(() => {
+    if (!bootDone) return;
+    const t = setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }, 0);
+    return () => clearTimeout(t);
+  }, [bootDone, textHash]);
 
-  scroll: { flex: 1 },
-  scrollContent: { padding: 12, gap: 10 },
+  useEffect(() => {
+    if (!bootDone) return;
+    if (phase === "LOGIN_USER" || phase === "LOGIN_PASS") {
+      const t = setTimeout(() => inputRef.current?.focus(), 0);
+      return () => clearTimeout(t);
+    }
+  }, [bootDone, phase]);
 
-  bubble: {
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 14,
-    padding: 12,
-    gap: 6,
-  },
-  bubbleUser: {
-    alignSelf: "flex-end",
-    backgroundColor: "#17233a",
-    borderColor: "#2a3a60",
-    maxWidth: "92%",
-  },
-  bubbleAsst: {
-    alignSelf: "flex-start",
-    backgroundColor: "#111a2a",
-    borderColor: "#223454",
-    maxWidth: "92%",
-  },
-  bubbleSys: {
-    alignSelf: "stretch",
-    backgroundColor: "#0f1522",
-    borderColor: "#1c2a43",
-  },
-  bubbleRole: { color: ACCENT, fontWeight: "700" },
-  bubbleTs: { color: SUB, fontWeight: "500" },
-  bubbleText: { color: TXT, lineHeight: 20 },
+  const appendLines = (texts: string[], kind: LineKind = "normal") => {
+    setLines((prev) => {
+      const add = texts.map((t) => ({ id: idRef.current++, text: t, kind }));
+      const next = prev.concat(add);
+      return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+    });
+  };
 
-  inputRow: {
-    borderTopWidth: 1,
-    borderTopColor: BORDER,
-    padding: 10,
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "flex-end",
-  },
-  input: {
-    flex: 1,
-    minHeight: 44,
-    maxHeight: 140,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 14,
-    color: TXT,
-  },
-  sendBtn: {
-    backgroundColor: ACCENT,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: 14,
-  },
-  sendBtnDisabled: {
-    opacity: 0.5,
-  },
-  sendBtnText: { color: "#081022", fontWeight: "800" },
+  const onSubmitUser = () => {
+    appendLines([`user: ${user || "(blank)"}`], "normal");
+    setUser("");
+    setPhase("LOGIN_PASS");
+  };
 
-  warn: { color: "#ffcc66", paddingHorizontal: 12, paddingBottom: 10 },
-});
+  const onSubmitPass = () => {
+    const masked = "*".repeat(Math.min(pass.length || 1, 16));
+    appendLines([`password: ${masked}`], "normal");
+    setPass("");
+
+    // いかなる入力でも失敗 → BABEL開始
+    appendLines(["", "LOGIN FAILED.", "SELF DEFENSE PROGRAM ACTIVATED.", ""], "normal");
+    appendLines(INTRO_LINES, "normal");
+    appendLines([""], "normal");
+
+    setPhase("ERROR");
+    setTimeout(() => setPhase("BABEL"), 500);
+  };
+
+  // BABEL: 一定間隔で "BABEL " を追記、長くなったら折り返し（新しい行へ）
+  useEffect(() => {
+    if (!bootDone) return;
+    if (phase !== "BABEL") return;
+
+    const id = setInterval(() => {
+      setLines((prev) => {
+        const next = prev.slice();
+        const last = next.at(-1);
+
+        if (!last || last.kind !== "babel") {
+          next.push({ id: idRef.current++, text: BABEL_TOKEN, kind: "babel" });
+        } else if (last.text.length + BABEL_TOKEN.length <= WRAP_COL) {
+          next[next.length - 1] = { ...last, text: last.text + BABEL_TOKEN };
+        } else {
+          next.push({ id: idRef.current++, text: BABEL_TOKEN, kind: "babel" });
+        }
+
+        return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
+      });
+    }, BABEL_INTERVAL_MS);
+
+    return () => clearInterval(id);
+  }, [bootDone, phase]);
+
+  // --- Boot first ---
+  if (!bootDone) {
+    return <BootAnimation onDone={() => setBootDone(true)} />;
+  }
+
+  // --- Console ---
+  const prompt = phase === "LOGIN_USER" ? "user: " : phase === "LOGIN_PASS" ? "password: " : "";
+  const promptValue = phase === "LOGIN_USER" ? user : phase === "LOGIN_PASS" ? pass : "";
+  const setPromptValue = phase === "LOGIN_USER" ? setUser : setPass;
+
+  return (
+    <View style={{ flex: 1, backgroundColor: BG }}>
+      <ScrollView
+        ref={(r) => (scrollRef.current = r)}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 12, paddingBottom: 24 }}
+        keyboardShouldPersistTaps="handled"
+      >
+        {lines.map((ln) => (
+          <Text
+            key={ln.id}
+            style={{
+              color: ln.kind === "babel" ? FG_BABEL : FG_NORMAL,
+              fontFamily: monoFont(),
+              fontSize: 14,
+              lineHeight: 18,
+              includeFontPadding: false,
+            }}
+          >
+            {ln.text}
+          </Text>
+        ))}
+
+        {/* 重要：下にフォームを固定しない。“コンソールの最終行”で user/password の直後に入力 */}
+        {(phase === "LOGIN_USER" || phase === "LOGIN_PASS") && (
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <Text
+              style={{
+                color: FG_NORMAL,
+                fontFamily: monoFont(),
+                fontSize: 14,
+                lineHeight: 18,
+                includeFontPadding: false,
+              }}
+            >
+              {prompt}
+            </Text>
+            <TextInput
+              ref={(r) => (inputRef.current = r)}
+              value={promptValue}
+              onChangeText={setPromptValue}
+              onSubmitEditing={(
+                _e: NativeSyntheticEvent<TextInputSubmitEditingEventData>
+              ) => {
+                if (phase === "LOGIN_USER") onSubmitUser();
+                if (phase === "LOGIN_PASS") onSubmitPass();
+              }}
+              autoCorrect={false}
+              autoCapitalize="none"
+              spellCheck={false}
+              secureTextEntry={phase === "LOGIN_PASS"}
+              selectionColor={FG_NORMAL}
+              cursorColor={FG_NORMAL}
+              blurOnSubmit={false}
+              returnKeyType="done"
+              style={{
+                flex: 1,
+                color: FG_NORMAL,
+                fontFamily: monoFont(),
+                fontSize: 14,
+                lineHeight: 18,
+                padding: 0,
+                margin: 0,
+                ...(Platform.OS === "web"
+                  ? ({
+                      outlineStyle: "none",
+                      outlineWidth: 0,
+                      backgroundColor: "transparent",
+                    } as any)
+                  : null),
+              }}
+            />
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
