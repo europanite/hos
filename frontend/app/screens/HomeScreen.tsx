@@ -395,8 +395,8 @@ export default function HomeScreen() {
   const [pass, setPass] = useState("");
 
   const idRef = useRef(1);
-  const inputRef = useRef<TextInput | null>(null);
-  const scrollRef = useRef<ScrollView | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   const [lines, setLines] = useState<Line[]>(() => [
     { id: idRef.current++, text: "HOS CONSOLE", kind: "normal" },
@@ -489,8 +489,8 @@ export default function HomeScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: BG }}>
-      <ScrollView
-        ref={(r) => (scrollRef.current = r)}
+      <ScrollView 
+        ref={(r) => { scrollRef.current = r; }}
         style={{ flex: 1 }}
         contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 12, paddingBottom: 24 }}
         keyboardShouldPersistTaps="handled"
@@ -523,8 +523,8 @@ export default function HomeScreen() {
             >
               {prompt}
             </Text>
-            <TextInput
-              ref={(r) => (inputRef.current = r)}
+            <TextInput 
+              ref={(r) => { inputRef.current = r; }} 
               value={promptValue}
               onChangeText={setPromptValue}
               onSubmitEditing={(
