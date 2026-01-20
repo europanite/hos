@@ -15,7 +15,7 @@
 
 [PlayGround](https://europanite.github.io/hos/)
 
-A Client Side Expo Template.
+A HOS emulation.
 
 ---
 
