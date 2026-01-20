@@ -8,7 +8,6 @@ import { StatusBar } from "expo-status-bar";
 import { AuthProvider } from "./context/Auth";
 import SettingsBar from "./components/SettingsBar";
 import HomeScreen from "./screens/HomeScreen";
-import HosConsoleScreen from "./screens/HosConsoleScreen";
 
 const Stack = createNativeStackNavigator();
 
