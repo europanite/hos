@@ -76,8 +76,8 @@ export default function HomeScreen() {
 
   const API_BASE: string = (process.env.EXPO_PUBLIC_API_BASE ?? "").trim();
 
-  const scrollRef = useRef<ScrollView | null>(null);
-  const inputRef = useRef<TextInput | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   const [apiStatus, setApiStatus] = useState<"unknown" | "ok" | "error">("unknown");
   const [busy, setBusy] = useState(false);
@@ -244,7 +244,7 @@ export default function HomeScreen() {
         <View style={[styles.container, { maxWidth: CONTENT_MAX_W, flex: 1 }]}>
           <View style={styles.card}>
             <ScrollView
-              ref={scrollRef}
+              ref={(r) => { scrollRef.current = r; }}
               style={styles.scroll}
               contentContainerStyle={styles.scrollContent}
               keyboardShouldPersistTaps="handled"
@@ -280,8 +280,8 @@ export default function HomeScreen() {
             </ScrollView>
 
             <View style={styles.inputRow}>
-              <TextInput
-                ref={inputRef}
+              <TextInput 
+                ref={(r) => { inputRef.current = r; }}
                 style={styles.input}
                 value={draft}
                 onChangeText={setDraft}
